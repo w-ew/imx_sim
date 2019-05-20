@@ -1,0 +1,258 @@
+diff --git a/drivers/mxc/sim/imx_sim.c b/drivers/mxc/sim/imx_sim.c
+index e907bd3..6e1dfff 100755
+--- a/drivers/mxc/sim/imx_sim.c
++++ b/drivers/mxc/sim/imx_sim.c
+@@ -264,6 +264,7 @@ struct sim_t{
+ 	int protocol_type;
+ 	sim_timing_t timing_data;
+ 	sim_baud_t baud_rate;
++	u32 sclk_freq;
+ 	int timeout;
+ 	u8 nack_threshold;
+ 	u8 nack_enable;
+@@ -885,7 +886,15 @@ static void sim_start(struct sim_t *sim)
+ 	clk_rate = clk_get_rate(sim->clk);
+ 	clk_div = (clk_rate + sim->clk_rate - 1) / sim->clk_rate;
+ 	__raw_writel(clk_div, sim->ioaddr + CLK_PRESCALER);
+-
++	pr_err(
++		"SIM input clock is %d\n"
++		"CLK_PRESCALER set to ipg_perclk / %d\n"
++		"SCLK rate: %d (effective %d)\n",
++		clk_rate,
++		clk_div, 
++		sim->clk_rate,
++		clk_rate / clk_div);
++		
+ 	/*Set the port pin to be open drained*/
+ 	reg_data = __raw_readl(sim->ioaddr + OD_CONFIG);
+ 	if (sim->port_index == 1)
+@@ -904,6 +913,10 @@ static void sim_start(struct sim_t *sim)
+ 	/* presense detect */
+ 	pr_debug("%s p0_det is 0x%x \n", __func__,
+ 		 __raw_readl(sim->ioaddr + sim->port_detect_reg));
++
++	/* Invert card presence pin polarity  */
++	/* TODO: add devicetree parameter */
++#if 0
+ 	if (__raw_readl(sim->ioaddr +  sim->port_detect_reg)
+ 			& SIM_PORT_DETECT_SPDP) {
+ 		reg_data = __raw_readl(sim->ioaddr +  sim->port_detect_reg);
+@@ -918,6 +931,22 @@ static void sim_start(struct sim_t *sim)
+ 		sim->present = SIM_PRESENT_DETECTED;
+ 		sim->state = SIM_STATE_DETECTED;
+ 	};
++#endif
++
++	if (__raw_readl(sim->ioaddr +  sim->port_detect_reg)
++			& SIM_PORT_DETECT_SPDP) {
++		reg_data = __raw_readl(sim->ioaddr +  sim->port_detect_reg);
++		reg_data &= ~SIM_PORT_DETECT_SPDS;
++		__raw_writel(reg_data, sim->ioaddr +  sim->port_detect_reg);
++		sim->present = SIM_PRESENT_DETECTED;
++		sim->state = SIM_STATE_DETECTED;
++	} else {
++		reg_data = __raw_readl(sim->ioaddr + sim->port_detect_reg);
++		reg_data |= SIM_PORT_DETECT_SPDS;
++		__raw_writel(reg_data, sim->ioaddr + sim->port_detect_reg);
++		sim->present = SIM_PRESENT_REMOVED;
++		sim->state = SIM_STATE_REMOVED;
++	};
+ 
+ 	/*enable card interrupt. clear interrupt status*/
+ 	reg_data = __raw_readl(sim->ioaddr + sim->port_detect_reg);
+@@ -992,7 +1021,7 @@ static void sim_deactivate(struct sim_t *sim)
+ 				sim->ioaddr + sim->port_ctrl_reg);
+ 		}
+ 	} else
+-		pr_err(">>>No card%s\n", __func__);
++		pr_err("No card (%s)\n", __func__);
+ };
+ 
+ static void sim_cold_reset(struct sim_t *sim)
+@@ -1003,7 +1032,7 @@ static void sim_cold_reset(struct sim_t *sim)
+ 		sim_cold_reset_sequency(sim);
+ 		sim_receive_atr_set(sim);
+ 	} else {
+-		pr_err("No card%s\n", __func__);
++		pr_err("No card (%s)\n", __func__);
+ 	}
+ };
+ 
+@@ -1041,7 +1070,7 @@ static void sim_warm_reset(struct sim_t *sim)
+ 		sim_warm_reset_sequency(sim);
+ 		sim_receive_atr_set(sim);
+ 	} else {
+-		pr_err("No card%s\n", __func__);
++		pr_err("No card (%s)\n", __func__);
+ 	}
+ };
+ 
+@@ -1085,28 +1114,84 @@ static int sim_check_baud_rate(sim_baud_t *baud_rate)
+ 
+ static int sim_set_baud_rate(struct sim_t *sim)
+ {
+-	u32 reg_data;
+-	reg_data = __raw_readl(sim->ioaddr + CNTL);
+-	reg_data &= ~(SIM_CNTL_BAUD_SEL_MASK);
++	u32 reg_cntl, reg_divisor;
++	reg_cntl = __raw_readl(sim->ioaddr + CNTL);
++	int baud_sel = 7;
++	// reg_cntl &= ~(SIM_CNTL_BAUD_SEL_MASK);
++
++	//pr_err("sim_set_baud_rate: fi %d, di %d\n", 
++	//	sim->baud_rate.fi, sim->baud_rate.di);
++
+ 
+-	switch (sim->baud_rate.di) {
+-	case 1:
+-		reg_data |= SIM_CNTL_BAUD_SEL(0);
+-		break;
+-	case 2:
+-		reg_data |= SIM_CNTL_BAUD_SEL(1);
+-		break;
+-	case 3:
+-		reg_data |= SIM_CNTL_BAUD_SEL(2);
+-		break;
+-	default:
+-		pr_err("Invalid baud Di, Using default 372 / 1\n");
+-		reg_data |= SIM_CNTL_BAUD_SEL(0);
+-		break;
+-	}
+ 
+-	__raw_writel(reg_data, sim->ioaddr + CNTL);
+ 
++	// try to find a baud_sel value for the requested F/D
++	if(sim->baud_rate.fi == 372) {
++
++		switch (sim->baud_rate.di) {
++		case 1:
++			baud_sel = 0;
++			break;
++		case 2:
++			baud_sel = 1;
++			break;
++		case 3: /* invalid */
++		case 4:
++			baud_sel = 2;
++			break;
++		};
++		
++	} else if(sim->baud_rate.fi == 512) {
++		
++		switch(sim->baud_rate.di) {
++		case 8:
++			baud_sel = 3;
++			break;
++		case 16:
++			baud_sel = 4;
++			break;
++		case 32:
++			baud_sel = 5;
++			break;
++		case 64:
++			baud_sel = 6;
++			break;
++		};
++		
++	};
++	
++	reg_cntl &= ~(SIM_CNTL_BAUD_SEL_MASK);	
++	reg_cntl |= SIM_CNTL_BAUD_SEL(baud_sel);
++	
++	if(baud_sel == 7) {
++
++		pr_err("Custom divider values not supported yet (requested %d/%d)\nUsing default 372/1", 
++			sim->baud_rate.fi, sim->baud_rate.di);
++		
++		baud_sel = 0;
++
++	};
++#if 0
++		/* Use DIVISOR reg. */
++		/* calculate divider value for sample12 set */
++		/* TODO: set sample12 if F divisable by 3, clear otherwise */
++		reg_cntl |= SIM_CNTL_BAUD_SEL(7);
++		reg_divisor = sim->baud_rate.fi / (sim->baud_rate.di * 12);
++		pr_err("Setting DIVISOR to %d for F/D: %d/%d\n", reg_divisor, sim->baud_rate.fi, sim->baud_rate.di);
++		
++		__raw_writel(reg_divisor, sim->ioaddr + DIVISOR);
++	};
++#endif
++
++	__raw_writel(reg_cntl, sim->ioaddr + CNTL);
++
++	pr_debug("Set f/d to %d/%d, baud_sel: %d\n", 
++		sim->baud_rate.fi, 
++		sim->baud_rate.di, 
++		(reg_cntl & SIM_CNTL_BAUD_SEL_MASK) >> 6
++		);
++
++	
+ 	return 0;
+ }
+ 
+@@ -1297,6 +1382,7 @@ static long sim_ioctl(struct file *file,
+ 	unsigned long timeout;
+ 	u32 reg_data;
+ 	u32 delay;
++	u32 sclk_freq;
+ 	u32 copy_cnt, val;
+ 	unsigned long flags;
+ 	unsigned char __user *atr_buffer;
+@@ -1587,11 +1673,33 @@ static long sim_ioctl(struct file *file,
+ 			pr_err("Copy Error\n");
+ 			errval = ret;
+ 			break;
+-		}
++		};
++		
++		pr_debug("Baudrate set to %d/%d\n", 
++					sim->baud_rate.fi, sim->baud_rate.di);
+ 
+-		sim_check_baud_rate(&sim->baud_rate);
++		// TODO: -EINVAL for impossible f/d
++					
++		ret = 0;
+ 
++
++		/* return value ignored and no side effect - below call would
++		   be optimized out anyway */
++		//sim_check_baud_rate(&sim->baud_rate);
++
++		break;
++		
++		
++	case SIM_IOCTL_SET_SCLK:
++		ret = copy_from_user(&sim->clk_rate, (u32 *)arg,
++					sizeof(int));
++					
++		if(ret) {
++			pr_err("Copy Error\n");
++			errval = ret;
++		};
+ 		break;
++		
+ 	case SIM_IOCTL_WAIT:
+ 		ret = copy_from_user(&delay, (unsigned int *)arg,
+ 					sizeof(unsigned int));
+diff --git a/include/linux/mxc_sim_interface.h b/include/linux/mxc_sim_interface.h
+index 5eae53a..ba0ed33 100644
+--- a/include/linux/mxc_sim_interface.h
++++ b/include/linux/mxc_sim_interface.h
+@@ -60,7 +60,7 @@ typedef struct {
+ 
+ typedef struct {
+ 	unsigned char di;
+-	unsigned char fi;
++	unsigned short fi;
+ } sim_baud_t;
+ 
+ /* Interface power states */
+@@ -120,5 +120,6 @@ typedef struct {
+ #define SIM_IOCTL_SET_TIMING		_IOR(SIM_IOCTL_BASE, 12, sim_timing_t)
+ #define SIM_IOCTL_SET_BAUD		_IOR(SIM_IOCTL_BASE, 13, sim_baud_t)
+ #define SIM_IOCTL_WAIT			_IOR(SIM_IOCTL_BASE, 14, unsigned int)
++#define SIM_IOCTL_SET_SCLK		_IOR(SIM_IOCTL_BASE, 15, unsigned int)
+ 
+ #endif
